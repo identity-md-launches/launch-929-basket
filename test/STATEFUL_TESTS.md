@@ -46,3 +46,10 @@ underfunded losses instead of incorrectly assuming custody always covers all
 liabilities. The random handler uses partial confiscations to keep recovery paths
 reachable; the existing loss suite covers complete and debt-underfunding cases.
 The existing 64-asset suite separately attacks gas exhaustion and hostile upgrades.
+
+The revision adds a 1,000-case redemption rollback campaign with existing deferred
+debt, both fee settings, an earlier paid leg, an earlier blocked leg, and a later
+slippage failure. It checks custody, managed balances, debts, fees and shares before
+retrying with exact minima. A governance regression also checks that a failed
+listing leaves its proposal ready and the daily allowance available to a separate
+feed replacement, then permits the recovered listing after the cooldown.

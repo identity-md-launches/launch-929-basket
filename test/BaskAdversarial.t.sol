@@ -4,6 +4,71 @@ pragma solidity 0.8.26;
 import {BaskBase, BaskVault, HostileUpgrade} from "./BaskBase.t.sol";
 
 contract BaskAdversarialTest is BaskBase {
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzzLateSlippageRollsBackPaidAndOwedLegs(uint96 shareSeed, bool fees) public {
+        for (uint256 i; i < 3; ++i) {
+            _deposit(i, (i + 1) * 10e18, ALICE);
+        }
+        if (fees) {
+            vm.prank(OWNER);
+            vault.setFeeRecipient(BOB);
+        }
+        stocks[1].setBlocked(ALICE, true);
+        // Keep an existing debt: a failed redemption must neither erase nor increase it.
+        _redeem(ALICE, vault.balanceOf(ALICE) / 5);
+        uint256 supply = vault.totalSupply();
+        uint256 aliceShares = vault.balanceOf(ALICE);
+        uint256 feeShares = vault.balanceOf(BOB);
+        uint256 shares = bound(uint256(shareSeed), 1e18, aliceShares);
+        uint256[3] memory managed;
+        uint256[3] memory custody;
+        uint256[3] memory paid;
+        uint256[3] memory debt;
+        uint256[] memory minimums = new uint256[](3);
+        for (uint256 i; i < 3; ++i) {
+            address token = address(stocks[i]);
+            managed[i] = vault.managed(token);
+            custody[i] = stocks[i].balances(address(vault));
+            paid[i] = stocks[i].balances(ALICE);
+            debt[i] = vault.owed(ALICE, token);
+            minimums[i] = managed[i] * (shares - _fee(shares)) / supply;
+            assertGt(minimums[i], 0, "every leg must be exercised");
+        }
+        assertGt(debt[1], 0);
+        // Asset 0 pays and asset 1 records debt before asset 2 rejects the redemption.
+        ++minimums[2];
+        vm.prank(ALICE);
+        vm.expectRevert(BaskVault.Slippage.selector);
+        vault.redeem(shares, minimums, vm.getBlockTimestamp());
+        assertEq(vault.totalSupply(), supply, "failed exit burned shares");
+        assertEq(vault.balanceOf(ALICE), aliceShares);
+        assertEq(vault.balanceOf(BOB), feeShares, "failed exit collected a fee");
+        for (uint256 i; i < 3; ++i) {
+            address token = address(stocks[i]);
+            assertEq(vault.managed(token), managed[i]);
+            assertEq(stocks[i].balances(address(vault)), custody[i]);
+            assertEq(stocks[i].balances(ALICE), paid[i]);
+            assertEq(vault.owed(ALICE, token), debt[i]);
+            assertEq(vault.totalOwed(token), debt[i]);
+        }
+        // Exact minima allow a retry, including the blocked leg's deferred entitlement.
+        --minimums[2];
+        vm.prank(ALICE);
+        assertEq(vault.redeem(shares, minimums, vm.getBlockTimestamp()), minimums);
+        assertEq(vault.totalSupply(), supply - (fees ? shares - _fee(shares) : shares));
+        assertEq(vault.balanceOf(ALICE), aliceShares - shares);
+        assertEq(vault.balanceOf(BOB), feeShares + (fees ? _fee(shares) : 0));
+        for (uint256 i; i < 3; ++i) {
+            address token = address(stocks[i]);
+            uint256 transferred = i == 1 ? 0 : minimums[i];
+            assertEq(vault.managed(token), managed[i] - minimums[i]);
+            assertEq(stocks[i].balances(address(vault)), custody[i] - transferred);
+            assertEq(stocks[i].balances(ALICE), paid[i] + transferred);
+            assertEq(vault.owed(ALICE, token), debt[i] + minimums[i] - transferred);
+            assertEq(vault.totalOwed(token), debt[i] + minimums[i] - transferred);
+        }
+    }
+
     function testClaimExpensiveBalanceReadsAndRedeemWithinPayoutBudget() public {
         uint256 shares = _deposit(0, 10e18, ALICE);
         stocks[0].setPaused(true);

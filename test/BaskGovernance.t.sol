@@ -114,6 +114,46 @@ contract BaskGovernanceTest is BaskBase {
         assertEq(vault.allAssets()[0].feed, address(replacement));
     }
 
+    function testListingFailurePreservesProposalAndDailySlotForAnotherChange() public {
+        (MockStock token, MockFeed feed) = _newAsset(4);
+        MockFeed replacement = new MockFeed();
+        vm.startPrank(OWNER);
+        uint256 listing = vault.proposeAsset(address(token), address(feed));
+        uint256 change = vault.proposeFeed(address(stocks[0]), address(replacement));
+        vm.stopPrank();
+        vm.warp(vm.getBlockTimestamp() + 7 days);
+        uint256 nextChange = vault.nextAssetChangeAt();
+        feed.configure(8, address(0), 0);
+        vm.prank(BOB);
+        vm.expectRevert(abi.encodeWithSelector(BaskVault.InvalidFeed.selector, address(feed)));
+        vault.executeProposal(listing);
+        assertEq(vault.assetCount(), 3);
+        assertEq(vault.assetIndexPlusOne(address(token)), 0);
+        assertEq(vault.nextAssetChangeAt(), nextChange, "failure consumed the daily allowance");
+        assertEq(uint256(vault.proposalState(listing)), uint256(BaskVault.ProposalState.Ready));
+        uint256[] memory pending = vault.pendingProposals(1, 2);
+        assertEq(pending.length, 2);
+        assertEq(pending[0], listing);
+        assertEq(pending[1], change);
+
+        vm.prank(BOB);
+        vault.executeProposal(change);
+        assertEq(vault.allAssets()[0].feed, address(replacement));
+        uint256 retryAt = vm.getBlockTimestamp() + 1 days;
+        assertEq(vault.nextAssetChangeAt(), retryAt);
+        feed.configure(8, address(1), 0);
+        vm.expectRevert(BaskVault.ChangeTooSoon.selector);
+        vault.executeProposal(listing);
+        assertEq(uint256(vault.proposalState(listing)), uint256(BaskVault.ProposalState.Ready));
+        vm.warp(retryAt);
+        vm.prank(BOB);
+        vault.executeProposal(listing);
+        assertEq(vault.assetCount(), 4);
+        assertEq(vault.assetIndexPlusOne(address(token)), 4);
+        assertEq(uint256(vault.proposalState(listing)), uint256(BaskVault.ProposalState.Executed));
+        assertEq(vault.pendingProposals(1, 2).length, 0);
+    }
+
     function testFeedReplacementChecksBothTimesAndPreservesBand() public {
         MockFeed replacement = new MockFeed();
         replacement.set(401e8, vm.getBlockTimestamp());
