@@ -25,7 +25,7 @@ The EVM constant optimizer is disabled while the overall optimizer remains on at
 200 runs. Otherwise Solidity pools event topics in a trailing raw-data table,
 which the pinned deployment check interprets as opcodes. This keeps the bytecode
 compatible with that check without changing contract behavior. Runtime is
-22,203 bytes under these settings.
+22,258 bytes under these settings.
 
 ## Deployment parameters
 
@@ -117,7 +117,11 @@ transfer taxes are not measured: the specified check is the vault's exact debit.
 
 `claim(token, to)` lets the creditor choose any nonzero destination. It attempts
 `min(callerOwed, actualVaultBalance)`, without reserving other claims first, using
-the same atomic payout with no 250,000-gas frame limit. Failed claims revert and
+the same atomic payout with no 250,000-gas frame limit. Its initial balance read
+and both balance reads inside `payLeg` use the remaining gas, without a fixed
+50,000-gas cap; they still copy only 32 bytes and require exactly 32 returned
+bytes. Redeem's allocation read retains its 50,000-gas cap and its entire payout
+frame retains its 250,000-gas cap. Failed claims revert and
 preserve the credit. A claim may therefore consume more transaction gas than a
 redemption leg. Partially funded creditors can claim again after replenishment.
 No role can gate either exit function. Token-level restrictions can still defer
@@ -217,14 +221,58 @@ asset order. Deadlines are inclusive (`now <= deadline`).
 These are accepted economic and operational assumptions, without additional
 mechanisms:
 
-1. A lagging feed can permit deposit-then-redeem profit when its lag exceeds the
-   1% round-trip fee.
+1. A lagging feed can permit deposit-then-redeem profit. With a separate fee
+   recipient set, the nominal round-trip cost is about 1% (0.9975% before
+   rounding). While unset, the unminted deposit fee benefits all holders,
+   including the depositor, so the effective cost can approach 0.5% for a
+   dominant depositor. The local $1,000 initial position / $10,000 subsequent
+   deposit example costs about 54 basis points while unset versus 99 basis
+   points with a separate recipient. Select and set the final fee recipient
+   before opening deposits if the nominal fee economics are intended.
 2. The owner pairs each Stock Token with its true feed. Factory identity and
    feed-format checks cannot establish economic correspondence.
 3. An untransferable asset retains its feed value until deposits are paused.
 4. A retired asset counts zero in NAV, even with a managed balance.
 5. There is no per-asset concentration limit; one asset can represent any share
    of NAV.
+
+The following consequences also follow from the specified accounting and
+permissionless execution. No additional contract mechanisms address them:
+
+- Zero NAV with outstanding shares makes deposits permanently unavailable.
+  The locked `1e15` shares prevent supply returning to zero after initial use;
+  listing new empty assets or sending tokens directly cannot restart deposits.
+  Do not retire the last unretired position with positive NAV if continued
+  deposits are intended. A complete recognized loss can cause the same state.
+  Redeem and claim remain available.
+- Anyone can bundle deposit, execution of a ready feed replacement, and redeem
+  in one transaction to capture a favorable repricing. The local $100-to-$300
+  replacement example returns about $165,279 for a $100,000 deposit. Pause
+  deposits before the proposal becomes ready and keep them paused across the
+  repricing; attempting to execute first does not guarantee ordering.
+- Retired balances remain redeemable even though NAV excludes them. New
+  depositors can acquire part of those positions without paying their value:
+  the local example with half the original NAV retired returns about $14,887
+  for a $10,000 deposit. Pause deposits before retiring a material managed
+  position and keep them paused while the remaining retired holdings would
+  materially distort share pricing. A ready retirement can also be bundled
+  with deposits and redemption by its executor.
+- A deposit followed immediately by redeem still consumes the bucket. Filling
+  it can reject other deposits despite the assets having left. Capacity returns
+  through elapsed-time decay, so this is not necessarily a full day of rejecting
+  every amount; the local full-$100,000-bucket example accepts a $100 deposit
+  after one hour. Repeated deposits can consume the recovered capacity.
+- Raw balance increases outside deposit never increase `managed`. Hypothetical
+  splits or in-kind distributions that credit raw units can therefore leave
+  surplus outside share accounting, as can tokens restored after a recognized
+  loss. Such surplus has no sweep or resynchronization path, although actual
+  balances can still fund existing owed claims. A display-only multiplier
+  change is different from a raw balance credit. Verify token/feed unit
+  correspondence and corporate-action behavior when selecting assets; pause
+  deposits and close the affected asset around any raw-balance-changing action.
+  These controls do not recover surplus or stop permissionless loss recognition
+  after seven days. Monitor and seek restoration of temporary shortfalls before
+  that point; a transfer pause alone does not establish a balance shortfall.
 
 The operator must monitor feed freshness, transfer restrictions, deficits,
 pending proposals and the effect of retirement on share pricing. The guardian
@@ -237,7 +285,8 @@ Tokens. Production feed addresses and their economic correspondence remain the
 owner's deployment-time responsibility.
 
 The local adversarial tests cover transfer pauses, recipient blocks, upgraded
-unreadable tokens, gas exhaustion, malformed/oversized return data, exact debit
+unreadable tokens, costly balance reads during claims, gas exhaustion,
+malformed/oversized return data, exact debit
 rollback, reentrant callbacks, partial claims, solvency/loss delays, proposal
 invalidation and role attempts to block exits. Dedicated tests populate all 64
 positions and call redeem with less than 28,000,000 gas, including cold accounts
@@ -247,9 +296,13 @@ arithmetic. These are local implementation checks, not an independent security
 audit; separate contributor review remains necessary before release. Slither and
 Mythril were not run.
 
-Recorded local verification: `forge build`, `forge test` (57 tests, including
-three fuzz tests at 256 runs each), and `forge fmt --check` pass. With the pinned
-compiler configuration, measured cold 64-asset redeem calls used **22,674,427 gas**
-for near-budget balance reads plus exhausted payout calls, **10,295,260 gas** for
-upgraded unreadable tokens, and **7,991,439 gas** for mixed failure/retirement
-states. Each test also enforces a 27,999,999-gas call limit directly.
+Recorded local verification: `forge build`, `forge test` (60 retained tests,
+including three fuzz tests at 256 runs each, plus the supplied claim proof and
+eight advisory reproductions under disposable `test/scratch/`), and
+`forge fmt --check` pass. With the pinned compiler configuration, measured cold
+64-asset redeem calls used **22,795,771 gas** for near-budget balance reads plus
+exhausted payout calls, **22,745,436 gas** for upgraded unreadable tokens, and
+**9,677,575 gas** for mixed failure/retirement states. Each test also enforces a
+27,999,999-gas call limit directly. Claim regressions cover 60,000-gas balance
+reads, 270,000-gas reads that force redemption into owed credit, successful
+subsequent claims, and rollback of an inexact debit with costly balance reads.

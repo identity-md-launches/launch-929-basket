@@ -4,6 +4,61 @@ pragma solidity 0.8.26;
 import {BaskBase, BaskVault, HostileUpgrade} from "./BaskBase.t.sol";
 
 contract BaskAdversarialTest is BaskBase {
+    function testClaimExpensiveBalanceReadsAndRedeemWithinPayoutBudget() public {
+        uint256 shares = _deposit(0, 10e18, ALICE);
+        stocks[0].setPaused(true);
+        uint256[] memory deferred = _redeem(ALICE, shares / 2);
+        assertGt(deferred[0], 0);
+        stocks[0].setPaused(false);
+        stocks[0].setBalanceGas(60_000);
+        // Deposits retain the bounded read, but every claim balance read can exceed it.
+        _statusRevert(0, BaskVault.Reason.BalanceUnreadable, address(stocks[0]));
+        vm.prank(ALICE);
+        assertEq(vault.claim{gas: 5_000_000}(address(stocks[0]), BOB), deferred[0]);
+        assertEq(stocks[0].balances(BOB), deferred[0]);
+        assertEq(vault.owed(ALICE, address(stocks[0])), 0);
+        assertEq(vault.totalOwed(address(stocks[0])), 0);
+
+        uint256[] memory paid = _redeem(ALICE, shares - shares / 2);
+        assertGt(paid[0], 0);
+        assertEq(stocks[0].balances(ALICE), paid[0]);
+        assertEq(vault.totalOwed(address(stocks[0])), 0);
+        assertEq(stocks[0].balances(address(vault)), vault.managed(address(stocks[0])));
+    }
+
+    function testBalanceReadExceedingPayoutBudgetDefersThenClaims() public {
+        uint256 shares = _deposit(0, 10e18, ALICE);
+        stocks[0].setBalanceGas(270_000);
+        vm.prank(ALICE);
+        uint256[] memory legs = vault.redeem{gas: 1_000_000}(shares, new uint256[](0), block.timestamp);
+        assertGt(legs[0], 0);
+        assertEq(vault.owed(ALICE, address(stocks[0])), legs[0]);
+        assertEq(vault.totalOwed(address(stocks[0])), legs[0]);
+        assertEq(stocks[0].balances(address(vault)), 10e18);
+        vm.prank(ALICE);
+        assertEq(vault.claim{gas: 5_000_000}(address(stocks[0]), ALICE), legs[0]);
+        assertEq(stocks[0].balances(ALICE), legs[0]);
+        assertEq(vault.owed(ALICE, address(stocks[0])), 0);
+        assertEq(vault.totalOwed(address(stocks[0])), 0);
+        assertEq(stocks[0].balances(address(vault)), vault.managed(address(stocks[0])));
+    }
+
+    function testExpensiveClaimBalanceReadsStillEnforceExactDebit() public {
+        uint256 shares = _deposit(0, 10e18, ALICE);
+        stocks[0].setPaused(true);
+        uint256[] memory legs = _redeem(ALICE, shares);
+        stocks[0].setPaused(false);
+        stocks[0].setBalanceGas(60_000);
+        stocks[0].setTransferMode(6); // Debits one extra unit; the entire claim must roll back.
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(BaskVault.TransferFailed.selector, address(stocks[0])));
+        vault.claim{gas: 5_000_000}(address(stocks[0]), ALICE);
+        assertEq(stocks[0].balances(ALICE), 0);
+        assertEq(stocks[0].balances(address(vault)), 10e18);
+        assertEq(vault.owed(ALICE, address(stocks[0])), legs[0]);
+        assertEq(vault.totalOwed(address(stocks[0])), legs[0]);
+    }
+
     function testAllUnreadableBalanceOutcomesDeferWithoutRevert() public {
         uint256 shares = _deposit(0, 100e18, ALICE);
         for (uint256 mode = 1; mode <= 6; ++mode) {

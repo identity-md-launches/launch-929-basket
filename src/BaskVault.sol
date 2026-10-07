@@ -638,11 +638,11 @@ contract BaskVault {
     /// @dev Atomic payout frame. Only entered by redeem/claim while their guard is held.
     function payLeg(address token, address to, uint256 amount) external {
         if (msg.sender != address(this)) revert Unauthorized();
-        (bool ok, uint256 beforeBalance) = _balance(token);
+        (bool ok, uint256 beforeBalance) = _balance(token, gasleft());
         if (!ok) revert TransferFailed(token);
         _tokenCall(token, abi.encodeWithSignature("transfer(address,uint256)", to, amount));
         uint256 afterBalance;
-        (ok, afterBalance) = _balance(token);
+        (ok, afterBalance) = _balance(token, gasleft());
         if (!ok || beforeBalance < afterBalance || beforeBalance - afterBalance != amount) {
             revert TransferFailed(token);
         }
@@ -651,7 +651,7 @@ contract BaskVault {
 
     function claim(address token, address to) external nonReentrant returns (uint256 amount) {
         if (to == address(0)) revert InvalidAddress();
-        (bool ok, uint256 available) = _balance(token);
+        (bool ok, uint256 available) = _balance(token, gasleft());
         if (!ok) revert BalanceUnreadable(token);
         amount = owed[msg.sender][token];
         if (available < amount) amount = available;
@@ -818,7 +818,12 @@ contract BaskVault {
     }
 
     function _balance(address token) internal view returns (bool, uint256) {
-        return _word(token, abi.encodeWithSignature("balanceOf(address)", address(this)), 50_000);
+        return _balance(token, 50_000);
+    }
+
+    // Payout reads use the remaining frame gas; redeem still bounds the entire frame at 250,000.
+    function _balance(address token, uint256 gasLimit) internal view returns (bool, uint256) {
+        return _word(token, abi.encodeWithSignature("balanceOf(address)", address(this)), gasLimit);
     }
 
     function _word(address target, bytes memory data, uint256 gasLimit)

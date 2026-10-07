@@ -54,6 +54,7 @@ contract MockStock {
     bool public oraclePause;
     uint256 public oracleMode;
     uint256 public balanceMode;
+    uint256 public balanceGas;
     uint256 public transferMode;
     address public callback;
     bytes public callbackData;
@@ -78,6 +79,10 @@ contract MockStock {
 
     function setBalanceMode(uint256 value) external {
         balanceMode = value;
+    }
+
+    function setBalanceGas(uint256 value) external {
+        balanceGas = value;
     }
 
     function setTransferMode(uint256 value) external {
@@ -117,6 +122,13 @@ contract MockStock {
     }
 
     function balanceOf(address who) external view returns (uint256) {
+        uint256 needed = balanceGas;
+        if (needed != 0) {
+            uint256 start = gasleft();
+            while (start - gasleft() < needed) {
+                assembly { pop(keccak256(0, 32)) }
+            }
+        }
         uint256 mode = balanceMode;
         if (mode == 1) revert("balance unreadable");
         if (mode == 2) {
