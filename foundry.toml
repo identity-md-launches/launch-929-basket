@@ -1,0 +1,16 @@
+[profile.default]
+src = "src"
+test = "test"
+libs = ["lib"]
+solc = "0.8.26"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+# Keep event topics as PUSH data rather than a trailing constant table; the
+# deployment opcode check scans every byte outside PUSH immediates.
+optimizer_details = { constantOptimizer = false }
+evm_version = "cancun"
+bytecode_hash = "none"
+
+[fmt]
+line_length = 110
